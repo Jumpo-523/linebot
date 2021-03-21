@@ -1,6 +1,6 @@
 from django.shortcuts import render
 from django.http import HttpResponse, JsonResponse, HttpResponseRedirect
-import os, json
+import os, json, re
 
 import requests
 
@@ -11,9 +11,22 @@ LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_ACCESS_TOKEN = os.environ["LINE_ACCESS_TOKEN"]
 from django.views.decorators.csrf import csrf_exempt
 
+# for schedule calculation.
+today = datetime.datetime.now()
+td = today.date()
+curr_day = td.day
+curr_weekday = today.date().weekday()
+weekday_of_first_day = td.replace(day=1).weekday()
+curr_month = td.month
+
+# 今月分しかデータ取得できないし、何よりglobalで管理するべきではない気がする。
+first_weekdays = []
+for d in range(1, 8):
+    first_weekdays.append((d, (weekday_of_first_day + d - 1)%7))
+
 @csrf_exempt
 def callback(request):
-    # TODO: This function would be called when linebot was spoken by user
+    # TODO: This function would be called when linebot was spoken to by user
     # 
     # 
     # import pdb; pdb.set_trace()
@@ -25,14 +38,16 @@ def callback(request):
             # イベントの取得
             # import pdb;pdb.set_trace()
             for event in request_json['events']:
+                print(event)
                 reply_token = event['replyToken']
                 message_type = event['message']['type']
 
                 if message_type == 'text':
                     text = event['message']['text']
+                    content_type = parse_message(text)
 
                     # 応答 bot を呼ぶ
-                    reply_msg(reply_token, "ふなっしー？ふなっしーとは付かず離れずの距離を保っていたい")
+                    choose_response(content_type)
                     # reply += tool.reply_text(reply_token, text)
         return HttpResponse(status=200)
 
@@ -41,23 +56,101 @@ def callback(request):
 def parse_message(msg):
     # TODO: 燃えるゴミ・燃えないゴミの日を通知する。
     # NLP技術用いていずれ高度化する
-    garbage_type = "flammable"
+    garbage_type = "burnable"
     if "燃える" in msg:
         pass
     elif "燃えない" in msg:
-        garbage_type = "inflammable"
+        garbage_type = "non_burnable"
+    elif "ゴミ" in msg and re.match("？|?", msg):
+        garbage_type = "next_ask_trash_type"
     else:
         garbage_type = "unknown"
     return garbage_type
 
 
+def choose_response(content_type):
+    if content_type == "next_ask_trash_type":
+        reply_msg(reply_token, "ありがとうございますー！何のゴミの収集日を聞きたいですか？")
+    elif content_type == "unknown":
+        reply_msg(reply_token, "ふなっしー？ふなっしーとは付かず離れずの距離を保っていたい")
+    else:
+        # burnable / non_burnable
+        trash_info = get_next_trash_day_of(garbage_type, area_code)
+        reply_msg(reply_token, trash_info)
 
 
-def get_next_trash_day_of(garbage_type):
-
+def get_next_trash_day_of(garbage_type, area_code):
+    
     # TODO: dayOfWeekから次の{garbage_type}のゴミの日を計算してくれるmethod
-    pass
+    # areaの指定
+    # area = "夏見5～7丁目"
+    # >>> get_trash_info_area_of(area)
+    # The information is retrieved from the below site.
+    # "https://www.city.funabashi.lg.jp/kurashi/gomi/001/p001523.html"
+    # 
+    trash_info = get_trash_info_area_of(area_code)
+    # get 
+    when2collect = trash_info[garbage_type]
+    import calendar
+    nthWeek, weekdays, day_or_night= when2collect.split("/")
+    weekdays = [int(wd) for wd in weekdays.split(",")]
+    nthWeek = int(nthWeek)
+    first_target_weekday = list(filter(lambda x: x[1] in weekdays, first_weekdays))
 
+    if len(first_target_weekday) == 1:
+        # get day first_target_weekday[0][0]
+        # 対象となる第{nthWeek}{day}曜日 (nthWeek - 1) * 7
+        target_day = first_target_weekday[0][0] + (nthWeek - 1) * 7
+    elif len(first_target_weekday) >= 2: 
+        # 可燃ごみ
+        # import pdb; pdb.set_trace()
+        if nthWeek == -1:# every week garbages are collected.
+            first_days = [fwd[0] for fwd in first_target_weekday]
+            candidate_days = [fd + (nthWeek_ - 1) * 7 for fd in first_days for nthWeek_ in range(1, 6)
+                     if fd + (nthWeek_ - 1) * 7 < 32]
+            # next dayを見つける
+            target_day = min(filter(lambda x: x >= curr_day, candidate_days))
+    else:
+        return "ちょっとわからんかったわ"
+    return f"{curr_month}月の{target_day}日が{garbage_type}を捨てる日だよ！{'時間帯は' + day_or_night + 'だよ' if day_or_night else '' }"
+
+
+
+def get_trash_info_area_of(area) -> dict:
+    # TODO: get data from area_trash_days table
+    # we have to retrieve info like the sample_natsume 
+    # "mon":0, "tue":1, "wed":2, "thu":3, "fri":4, "sat":5, "sun":6
+    # According to pandas document, the day of the week with Monday=0, Sunday=6.
+    # syntax: {1}/{2}/{3}
+    #   {1}: n-th week or every week (-1)
+    #   {2}: weekdays
+    #   {3}: day or night (or no information if blank)
+    sample_natsume = {"burnable":"-1/1,2/night",
+                    "non_burnable":"3/3/",  "Resources・PET" : "-1/2/", "valuables" : "-1/2/"}
+    # 
+    return sample_natsume
+
+
+
+def set_reminder():
+    """
+    朝の時間帯にpush messageを送信するように記録しておく機能
+    ---
+
+    CREATE 
+    (uuid, when2push, garbage_type) INTO Remind;
+    """
+    return "TO BE DONE"
+
+def push_remind():
+    """
+    朝8時に 1-3までを実行する
+    1. Execute the following query
+        SELECT * WHERE when2push == {str(td)};
+    2. QuerySetをuuidごとにまとめ、それぞれのユーザに対してメッセージを送信する。
+    """
+    
+    pass
 
 
 
@@ -90,20 +183,11 @@ def get_message_body(text, text_type):
             "items": [
             {
                 "type": "action",
-                # "imageUrl": "https://example.com/sushi.png",
-                "action": {
-                "type": "message",
-                "label": "Sushi",
-                "text": "Sushi"
-                }
-            },
-            {
-                "type": "action",
                 # "imageUrl": "https://example.com/tempura.png",
                 "action": {
                 "type": "message",
-                "label": "Tempura",
-                "text": "Tempura"
+                "label": "Remind",
+                "text": "Remind"
                 }
             },
             {
